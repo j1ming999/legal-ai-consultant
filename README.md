@@ -1,5 +1,10 @@
 # 法律智能问答系统
 
+![Java](https://img.shields.io/badge/Java-17-orange)
+![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.5-brightgreen)
+![LangChain4J](https://img.shields.io/badge/LangChain4J-1.0-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 基于 RAG（检索增强生成）技术的法律智能问答系统，支持法律法规的智能检索与问答，提供法条溯源功能。
 
 ## 功能特性
