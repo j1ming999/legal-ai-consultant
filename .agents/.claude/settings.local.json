@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \":*)",
+      "Bash(wc:*)",
+      "Bash(jar tf:*)",
+      "Bash(javap:*)",
+      "Read(//c/Users/16202/Desktop/开题报告和文献综述\\(4\\)/开题材料\\(1\\)/**)",
+      "Bash(python3 -c ':*)",
+      "Bash(python -c ':*)",
+      "Bash(python *)",
+      "Bash(mvn *)",
+      "Bash(taskkill /F /FI \"WINDOWTITLE eq consultant3*\")",
+      "Bash(pkill -f \"spring-boot:run\")",
+      "Bash(pkill -f \"consultant3\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //PID 142960 //F)"
+    ]
+  }
+}

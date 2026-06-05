@@ -1,0 +1,5 @@
+使用方法：
+1. 打开 Docker Desktop
+2. 启动两个容器（在终端或 Docker Desktop 界面都行）：
+  docker start consultant-mysql redis-vector
+3. IDEA 里跑项目
