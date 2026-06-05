@@ -22,7 +22,7 @@ spring:
   datasource:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:consultant}?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
     username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:root123}
+    password: ${DB_PASSWORD:your_password}
     driver-class-name: com.mysql.cj.jdbc.Driver
   data:
     redis:
@@ -34,5 +34,5 @@ mybatis-plus:
     log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
 
 jwt:
-  secret: ${JWT_SECRET:consultant-legal-ai-jwt-secret-key-2026}
+  secret: ${JWT_SECRET:your-jwt-secret-key-change-this-in-production}
   expiration: 604800000
