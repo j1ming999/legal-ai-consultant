@@ -2,4 +2,6 @@
 1. 打开 Docker Desktop
 2. 启动两个容器（在终端或 Docker Desktop 界面都行）：
   docker start consultant-mysql redis-vector
+  启动图谱数据库：
+  docker compose up -d
 3. IDEA 里跑项目

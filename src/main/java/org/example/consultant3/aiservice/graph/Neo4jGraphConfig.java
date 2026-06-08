@@ -31,7 +31,7 @@ public class Neo4jGraphConfig {
     private static final Logger log = LoggerFactory.getLogger(Neo4jGraphConfig.class);
 
     /** 修改此版本号可强制重建图谱 */
-    private static final String GRAPH_VERSION = "v1";
+    private static final String GRAPH_VERSION = "v2";
     private static final String VERSION_KEY = "legal:graph:version";
 
     @Value("${neo4j.uri:bolt://localhost:7687}")
@@ -102,9 +102,13 @@ public class Neo4jGraphConfig {
             int nodeCount = createArticleNodes(session, segments);
             log.info("  已创建 {} 个 Article 节点", nodeCount);
 
-            // 4. 创建 REFERS_TO 引用边
+            // 4. 创建 REFERS_TO 引用边（含跨法律引用）
             int edgeCount = createReferenceEdges(session, segments);
             log.info("  已创建 {} 条 REFERS_TO 边", edgeCount);
+
+            // 5. 创建 CROSS_REFERS_TO 跨法律引用边
+            int crossEdgeCount = createCrossLawReferenceEdges(session, segments);
+            log.info("  已创建 {} 条 CROSS_REFERS_TO 跨法律引用边", crossEdgeCount);
         }
 
         redisTemplate.opsForValue().set(VERSION_KEY, GRAPH_VERSION);
@@ -189,6 +193,86 @@ public class Neo4jGraphConfig {
             }
         }
         return edgeCount;
+    }
+
+    /**
+     * 创建跨法律引用边：源法条 → 其他法律的被引用法条。
+     * <p>
+     * 匹配《XX法》第Y条 模式，目标法律名做模糊匹配
+     * （因为引用中用的是简称如"劳动法"，但节点里存的是全称"中华人民共和国劳动法"）。
+     */
+    private int createCrossLawReferenceEdges(Session session, List<TextSegment> segments) {
+        ArticleReferenceExtractor extractor = new ArticleReferenceExtractor();
+        int edgeCount = 0;
+
+        // 先收集所有法律全称，做简称→全称的模糊映射
+        Set<String> allLawNames = new LinkedHashSet<>();
+        for (TextSegment seg : segments) {
+            String name = seg.metadata().getString("law_name");
+            if (name != null) allLawNames.add(name);
+        }
+
+        for (TextSegment seg : segments) {
+            String srcLaw = seg.metadata().getString("law_name");
+            String srcArticle = seg.metadata().getString("article_number");
+            if (srcLaw == null || srcArticle == null) continue;
+
+            Set<ArticleReferenceExtractor.CrossLawRef> crossRefs =
+                    extractor.extractCrossLawReferences(seg.text());
+            if (crossRefs.isEmpty()) continue;
+
+            for (ArticleReferenceExtractor.CrossLawRef ref : crossRefs) {
+                // 排除自引用（同一法律）
+                if (srcLaw.equals(ref.targetLawName) || srcLaw.contains(ref.targetLawName)
+                        || (ref.targetLawName.length() >= 4 && srcLaw.contains(ref.targetLawName))) {
+                    continue;
+                }
+
+                // 用简称模糊匹配找到目标法律的完整名称
+                String matchedLaw = findLawByName(allLawNames, ref.targetLawName);
+                if (matchedLaw == null) {
+                    continue; // 目标法律不在知识库中，跳过
+                }
+
+                session.run(
+                        "MATCH (src:Article {lawName: $srcLaw, articleNumber: $srcArticle}) " +
+                        "MATCH (tgt:Article {lawName: $tgtLaw, articleNumber: $tgtArticle}) " +
+                        "MERGE (src)-[:CROSS_REFERS_TO]->(tgt)",
+                        Values.parameters(
+                                "srcLaw", srcLaw,
+                                "srcArticle", srcArticle,
+                                "tgtLaw", matchedLaw,
+                                "tgtArticle", ref.targetArticle
+                        )
+                );
+                edgeCount++;
+            }
+        }
+        return edgeCount;
+    }
+
+    /**
+     * 在已有的法律名称集合中模糊匹配。
+     * 引用时常用简称（如"劳动合同法"），节点里是完整名称（如"中华人民共和国劳动合同法"）。
+     */
+    private String findLawByName(Set<String> allLawNames, String shortName) {
+        // 精确匹配
+        if (allLawNames.contains(shortName)) {
+            return shortName;
+        }
+        // contains 匹配：全称包含简称
+        for (String fullName : allLawNames) {
+            if (fullName.contains(shortName)) {
+                return fullName;
+            }
+        }
+        // 反向匹配：简称包含在全称中（如"《民法典》"匹配"中华人民共和国民法典"）
+        for (String fullName : allLawNames) {
+            if (shortName.length() >= 3 && fullName.contains(shortName.replace("《", "").replace("》", ""))) {
+                return fullName;
+            }
+        }
+        return null;
     }
 
     /**

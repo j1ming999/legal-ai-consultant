@@ -15,7 +15,7 @@ services:
       - mysql-data:/var/lib/mysql
 
   redis:
-    image: redis:7
+    image: redis/redis-stack-server:7.4.0-v1
     container_name: consultant-redis
     ports:
       - "6379:6379"
