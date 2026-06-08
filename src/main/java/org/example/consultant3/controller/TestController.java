@@ -534,6 +534,64 @@ public class TestController {
         return (double) relevant / limit;
     }
 
+    /**
+     * 通用检索器评测：对指定检索器跑测试集，返回 Recall@k 和 Precision@k
+     */
+    private Map<String, Object> runRetrieverBenchmark(
+            ContentRetriever retriever, String label, int limit) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        InputStream is = getClass().getResourceAsStream("/dataset/test-dataset.json");
+        List<Map<String, Object>> testCases = mapper.readValue(is, new TypeReference<>() {});
+        if (limit > 0 && limit < testCases.size()) {
+            testCases = testCases.subList(0, limit);
+        }
+
+        int total = testCases.size();
+        int positiveTotal = 0;
+        int recall5 = 0, recall10 = 0, recall15 = 0, recall20 = 0;
+        double prec5 = 0, prec10 = 0, prec15 = 0, prec20 = 0;
+        long totalTime = 0;
+
+        for (Map<String, Object> tc : testCases) {
+            String q = (String) tc.get("query");
+            String expect = (String) tc.get("expect");
+            Query query = Query.from(q);
+
+            if ("NOT_IN_KB".equals(expect)) continue;
+            positiveTotal++;
+
+            List<String> keywords = Arrays.asList(expect.split(","));
+
+            long start = System.currentTimeMillis();
+            List<Content> results = retriever.retrieve(query);
+            totalTime += System.currentTimeMillis() - start;
+
+            if (checkHitAtK(results, keywords, 5)) recall5++;
+            if (checkHitAtK(results, keywords, 10)) recall10++;
+            if (checkHitAtK(results, keywords, 15)) recall15++;
+            if (checkHitAtK(results, keywords, 20)) recall20++;
+            prec5 += precisionAtK(results, keywords, 5);
+            prec10 += precisionAtK(results, keywords, 10);
+            prec15 += precisionAtK(results, keywords, 15);
+            prec20 += precisionAtK(results, keywords, 20);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("strategy", label);
+        result.put("total_cases", total);
+        result.put("positive_cases", positiveTotal);
+        result.put("recall_at_5", pct(recall5, positiveTotal));
+        result.put("recall_at_10", pct(recall10, positiveTotal));
+        result.put("recall_at_15", pct(recall15, positiveTotal));
+        result.put("recall_at_20", pct(recall20, positiveTotal));
+        result.put("precision_at_5", pctDouble(prec5, positiveTotal));
+        result.put("precision_at_10", pctDouble(prec10, positiveTotal));
+        result.put("precision_at_15", pctDouble(prec15, positiveTotal));
+        result.put("precision_at_20", pctDouble(prec20, positiveTotal));
+        result.put("avg_time_ms", totalTime / Math.max(positiveTotal, 1));
+        return result;
+    }
+
     private List<Map<String, String>> buildResultList(List<Content> contents) {
         List<Map<String, String>> list = new ArrayList<>();
         for (Content c : contents) {
@@ -549,7 +607,22 @@ public class TestController {
     }
 
     /**
-     * (6) Agentic RAG 端到端批量测试
+     * (6) 图谱增强检索器精度测试
+     * <p>
+     * 测试 GraphHybridRetriever（图谱定位+向量补充）在测试集上的表现，
+     * 输出 Recall@5/10/15/20 和 Precision@5/10/15/20，可与 /test/batch 四组消融实验对比。
+     * <p>
+     * 用法: GET /test/graph-hybrid?limit=200
+     */
+    @GetMapping(value = "/graph-hybrid", produces = "application/json;charset=utf-8")
+    public Map<String, Object> graphHybridTest(
+            @RequestParam(required = false, defaultValue = "0") int limit) throws Exception {
+        ContentRetriever retriever = commonConfig.getGraphHybridRetriever();
+        return runRetrieverBenchmark(retriever, "图谱增强检索（图谱定位+向量补充）", limit);
+    }
+
+    /**
+     * (7) Agentic RAG 端到端批量测试
      * <p>
      * 将问题通过 ConsultantService.chat() 发送给 LLM（带工具调用），
      * 检查回答中是否引用了期望的法条关键词，测量全链路耗时。

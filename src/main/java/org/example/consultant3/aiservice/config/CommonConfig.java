@@ -123,7 +123,11 @@ public class CommonConfig {
         this.hybridRetriever = new HybridContentRetriever(vectorOnlyRetriever, keywordOnlyRetriever, 20, 1.0, 1.0);
         log.info("混合检索器就绪：向量检索(×1.0) + 关键词检索(×1.0) 等权RRF融合");
 
-        // 查询改写 + 混合检索
+        // 图谱增强检索器：Neo4j 图谱定位 + 向量语义补充，单次检索 < 500ms
+        this.graphHybridRetriever = new GraphHybridRetriever(hybridRetriever, neo4jGraphConfig, 20);
+        log.info("图谱增强检索器就绪：图谱定位 + 向量语义补充");
+
+        // 查询改写检索器（保留，供测试对比用）
         ChatModel rewriteModel = OpenAiChatModel.builder()
                 .baseUrl(dashscopeBaseUrl)
                 .apiKey(dashscopeApiKey)
@@ -133,19 +137,22 @@ public class CommonConfig {
         this.rewriteRetriever = new QueryRewriteRetriever(hybridRetriever, rewriteModel);
         log.info("查询改写检索器就绪");
 
-        return rewriteRetriever;
+        // 返回图谱增强检索器（取代 Agent 工具调用，实现单次检索+单次LLM生成，< 3s）
+        return graphHybridRetriever;
     }
 
     // 暴露给测试接口使用
     private ContentRetriever vectorOnlyRetriever;
     private KeywordContentRetriever keywordOnlyRetriever;
     private ContentRetriever hybridRetriever;
+    private ContentRetriever graphHybridRetriever;
     private QueryRewriteRetriever rewriteRetriever;
     private List<TextSegment> allSegments;
 
     public ContentRetriever getVectorOnlyRetriever() { return vectorOnlyRetriever; }
     public KeywordContentRetriever getKeywordOnlyRetriever() { return keywordOnlyRetriever; }
     public ContentRetriever getHybridRetriever() { return hybridRetriever; }
+    public ContentRetriever getGraphHybridRetriever() { return graphHybridRetriever; }
     public QueryRewriteRetriever getRewriteRetriever() { return rewriteRetriever; }
     public List<TextSegment> getAllSegments() { return allSegments; }
 
