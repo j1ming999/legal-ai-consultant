@@ -556,7 +556,7 @@ public class TestController {
      * <p>
      * 用法: GET /test/agent-batch?limit=200
      */
-    @GetMapping(value = "/test/agent-batch", produces = "application/json;charset=utf-8")
+    @GetMapping(value = "/agent-batch", produces = "application/json;charset=utf-8")
     public Map<String, Object> agentBatchTest(
             @RequestParam(required = false, defaultValue = "0") int limit) throws Exception {
 
