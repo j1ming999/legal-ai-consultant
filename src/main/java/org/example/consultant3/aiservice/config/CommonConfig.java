@@ -87,7 +87,8 @@ public class CommonConfig {
     public ContentRetriever contentRetriever(
             RedisEmbeddingStore redisEmbeddingStore,
             EmbeddingModel embeddingModel,
-            StringRedisTemplate redisTemplate
+            StringRedisTemplate redisTemplate,
+            org.neo4j.driver.Driver neo4jDriver  // 强制 Spring 先创建 Driver bean
     ) {
         // 始终解析文档（本地操作，无 API 调用，很快）
         List<TextSegment> allSegments = parseDocuments();
