@@ -586,10 +586,7 @@ public class TestController {
             long elapsed;
             long start = System.currentTimeMillis();
             try {
-                List<String> chunks = consultantService.chat(memoryId, query)
-                        .collectList()
-                        .block(java.time.Duration.ofSeconds(60));
-                response = chunks != null ? String.join("", chunks) : null;
+                response = consultantService.chatSync(memoryId, query);
                 elapsed = System.currentTimeMillis() - start;
                 if (response == null) {
                     response = "[超时]";
