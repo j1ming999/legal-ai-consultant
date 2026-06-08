@@ -22,6 +22,19 @@ services:
     volumes:
       - redis-data:/data
 
+  neo4j:
+    image: neo4j:5-community
+    container_name: consultant-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/neo4j123
+      NEO4J_server_memory_heap_max__size: 512m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+
 volumes:
   mysql-data:
   redis-data:
+  neo4j-data:

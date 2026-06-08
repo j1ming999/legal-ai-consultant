@@ -36,3 +36,8 @@ mybatis-plus:
 jwt:
   secret: ${JWT_SECRET:consultant-legal-ai-jwt-secret-key-2026}
   expiration: 604800000
+
+neo4j:
+  uri: ${NEO4J_URI:bolt://localhost:7687}
+  username: ${NEO4J_USERNAME:neo4j}
+  password: ${NEO4J_PASSWORD:neo4j123}

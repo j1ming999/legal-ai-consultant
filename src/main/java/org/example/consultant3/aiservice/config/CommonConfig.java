@@ -14,8 +14,10 @@ import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.content.retriever.EmbeddingStoreContentRetriever;
+import org.example.consultant3.aiservice.graph.Neo4jGraphConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -53,6 +55,9 @@ public class CommonConfig {
 
     @Value("${app.content.dir:src/main/resources/content}")
     private String contentDir;
+
+    @Autowired
+    private Neo4jGraphConfig neo4jGraphConfig;
 
     @Bean
     public ChatMemoryProvider chatMemoryProvider() {
@@ -95,6 +100,9 @@ public class CommonConfig {
         } else {
             log.info("法律文档向量库已是最新版本({}), 跳过导入", EMBEDDING_VERSION);
         }
+
+        // 构建/更新 Neo4j 知识图谱（版本号控制，已有则跳过）
+        neo4jGraphConfig.buildGraphIfNeeded(allSegments, redisTemplate);
 
         // 向量检索器（同时注册为 Bean 供测试对比使用）
         this.vectorOnlyRetriever = EmbeddingStoreContentRetriever.builder()

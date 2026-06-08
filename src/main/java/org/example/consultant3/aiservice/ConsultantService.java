@@ -10,9 +10,8 @@ import dev.langchain4j.service.spring.AiServiceWiringMode;
         wiringMode = AiServiceWiringMode.EXPLICIT,
         chatModel = "openAiChatModel",
         streamingChatModel = "openAiStreamingChatModel",
-//        chatMemory = "chatMemory",
         chatMemoryProvider = "chatMemoryProvider",
-        contentRetriever = "contentRetriever"
+        tools = {"legalTools"}
 )
 //@AiService
 public interface ConsultantService {
