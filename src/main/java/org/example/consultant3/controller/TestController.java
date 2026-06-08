@@ -4,6 +4,7 @@ import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.rag.content.Content;
 import dev.langchain4j.rag.content.retriever.ContentRetriever;
 import dev.langchain4j.rag.query.Query;
+import org.example.consultant3.aiservice.ConsultantService;
 import org.example.consultant3.aiservice.config.CommonConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,6 +30,9 @@ public class TestController {
 
     @Autowired
     private ContentRetriever contentRetriever; // 混合检索器
+
+    @Autowired
+    private ConsultantService consultantService; // Agentic AI 服务（端到端测试用）
 
     /**
      * (1) 检索精度对比测试
@@ -542,5 +546,126 @@ public class TestController {
             list.add(item);
         }
         return list;
+    }
+
+    /**
+     * (6) Agentic RAG 端到端批量测试
+     * <p>
+     * 将问题通过 ConsultantService.chat() 发送给 LLM（带工具调用），
+     * 检查回答中是否引用了期望的法条关键词，测量全链路耗时。
+     * <p>
+     * 用法: GET /test/agent-batch?limit=200
+     */
+    @GetMapping(value = "/test/agent-batch", produces = "application/json;charset=utf-8")
+    public Map<String, Object> agentBatchTest(
+            @RequestParam(required = false, defaultValue = "0") int limit) throws Exception {
+
+        ObjectMapper mapper = new ObjectMapper();
+        InputStream is = getClass().getResourceAsStream("/dataset/test-dataset.json");
+        List<Map<String, Object>> testCases = mapper.readValue(is, new TypeReference<>() {});
+        if (limit > 0 && limit < testCases.size()) {
+            testCases = testCases.subList(0, limit);
+        }
+
+        int total = testCases.size();
+        int positiveTotal = 0;
+        int hitCount = 0;
+        int partialHit = 0;
+        long totalTime = 0;
+        long maxTime = 0;
+        long minTime = Long.MAX_VALUE;
+        List<Map<String, Object>> details = new ArrayList<>();
+
+        for (Map<String, Object> tc : testCases) {
+            String query = (String) tc.get("query");
+            String expect = (String) tc.get("expect");
+            boolean isNegative = "NOT_IN_KB".equals(expect);
+            String memoryId = "agent-batch-" + tc.get("id");
+
+            String response = "";
+            long elapsed;
+            long start = System.currentTimeMillis();
+            try {
+                List<String> chunks = consultantService.chat(memoryId, query)
+                        .collectList()
+                        .block(java.time.Duration.ofSeconds(60));
+                response = chunks != null ? String.join("", chunks) : null;
+                elapsed = System.currentTimeMillis() - start;
+                if (response == null) {
+                    response = "[超时]";
+                    elapsed = 60000;
+                }
+            } catch (Exception e) {
+                response = "[错误] " + e.getMessage();
+                elapsed = System.currentTimeMillis() - start;
+            }
+
+            totalTime += elapsed;
+            if (elapsed > maxTime) maxTime = elapsed;
+            if (elapsed < minTime) minTime = elapsed;
+
+            boolean fullHit;
+            boolean partHit;
+
+            if (isNegative) {
+                fullHit = response.startsWith("[超时]") || response.startsWith("[错误]");
+                partHit = fullHit;
+            } else {
+                positiveTotal++;
+                List<String> keywords = Arrays.asList(expect.split(","));
+                int matched = 0;
+                for (String kw : keywords) {
+                    if (response.contains(kw.trim())) matched++;
+                }
+                fullHit = matched == keywords.size();
+                partHit = matched > 0;
+                if (fullHit) hitCount++;
+                if (partHit) partialHit++;
+            }
+
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("id", tc.get("id"));
+            detail.put("query", query);
+            detail.put("expect", expect);
+            detail.put("type", tc.get("type"));
+            detail.put("category", tc.get("category"));
+            detail.put("full_hit", fullHit);
+            detail.put("partial_hit", partHit);
+            detail.put("time_ms", elapsed);
+            detail.put("response_preview", response.length() > 300
+                    ? response.substring(0, 300) + "..." : response);
+            details.add(detail);
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("test_type", "Agentic RAG（LLM 自主工具调用）");
+        result.put("total_cases", total);
+        result.put("positive_cases", positiveTotal);
+        result.put("full_hit_count", hitCount);
+        result.put("full_hit_rate", pct(hitCount, positiveTotal));
+        result.put("partial_hit_count", partialHit);
+        result.put("partial_hit_rate", pct(partialHit, positiveTotal));
+        result.put("avg_time_ms", total > 0 ? totalTime / total : 0);
+        result.put("max_time_ms", maxTime);
+        result.put("min_time_ms", minTime == Long.MAX_VALUE ? 0 : minTime);
+
+        List<Map<String, Object>> failedCases = details.stream()
+                .filter(d -> !(boolean) d.get("full_hit"))
+                .limit(20)
+                .map(d -> {
+                    Map<String, Object> f = new LinkedHashMap<>();
+                    f.put("id", d.get("id"));
+                    f.put("query", d.get("query"));
+                    f.put("expect", d.get("expect"));
+                    f.put("partial_hit", d.get("partial_hit"));
+                    f.put("response_preview", d.get("response_preview"));
+                    return f;
+                })
+                .collect(Collectors.toList());
+        result.put("failed_count", failedCases.size());
+        result.put("failed_cases", failedCases);
+
+        result.put("details", details);
+        return result;
     }
 }
