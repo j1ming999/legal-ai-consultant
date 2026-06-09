@@ -12,16 +12,16 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 图谱增强混合检索器：向量初筛 → 图谱追引用链 → 合并。
+ * 图谱增强混合检索器：向量初筛 → 2-hop 图谱引用链 → 加权排序。
  * <p>
  * 流程（一次性，无需 LLM 参与决策）：
  * <ol>
  *   <li>向量检索 Top-10 种子法条（语义匹配，~200ms）</li>
- *   <li>Neo4j 查这 10 条的 REFERS_TO + CROSS_REFERS_TO 引用链（~50ms）</li>
- *   <li>合并：向量结果在前，图谱引用链追加在后，按 lawName+articleNumber 去重</li>
+ *   <li>Neo4j 追踪 2-hop 引用链：REFERS_TO → REFERS_TO 和 CROSS_REFERS_TO → REFERS_TO</li>
+ *   <li>加权合并：向量位置分 + 引用次数分，高被引法条插队提权</li>
  * </ol>
  * <p>
- * 向量负责初始命中，图谱负责关系补全。总耗时约 250ms。
+ * 向量负责初始命中，图谱负责关系补全。总耗时约 280ms。
  */
 public class GraphHybridRetriever implements ContentRetriever {
 
@@ -57,28 +57,38 @@ public class GraphHybridRetriever implements ContentRetriever {
             return List.of();
         }
 
-        Map<String, Content> merged = new LinkedHashMap<>();
+        // 记录每个法条的分数和位置
+        Map<String, Double> scores = new LinkedHashMap<>();
+        Map<String, Content> items = new LinkedHashMap<>();
 
-        // 先把向量结果放入（保持向量排序）
-        for (Content c : vectorResults) {
+        // 向量结果：分数 = 20 - rank（越靠前分越高）
+        for (int i = 0; i < vectorResults.size(); i++) {
+            Content c = vectorResults.get(i);
             String key = deduplicationKey(c);
-            if (key != null) merged.putIfAbsent(key, c);
+            if (key == null) continue;
+            items.putIfAbsent(key, c);
+            scores.merge(key, 20.0 - i, Math::max);
         }
 
         // 取前 10 条作为图谱种子
         List<Content> seeds = vectorResults.subList(0, Math.min(10, vectorResults.size()));
 
-        // === 阶段2：图谱追引用链 ===
+        // === 阶段2：图谱追 2-hop 引用链 ===
         try {
+            // 2-hop: 种子 → REFERS_TO → 引用法条 → REFERS_TO → 深度法条
+            //       种子 → CROSS_REFERS_TO → 跨法律法条 → REFERS_TO → 跨法律引用链
             String cypher = """
                     UNWIND $seeds AS seed
                     MATCH (a:Article {lawName: seed.law, articleNumber: seed.article})
-                    OPTIONAL MATCH (a)-[:REFERS_TO]->(ref:Article)
-                    OPTIONAL MATCH (a)-[:CROSS_REFERS_TO]->(cross:Article)
+                    OPTIONAL MATCH (a)-[:REFERS_TO]->(hop1:Article)
+                    OPTIONAL MATCH (hop1)-[:REFERS_TO]->(hop2:Article)
+                    OPTIONAL MATCH (a)-[:CROSS_REFERS_TO]->(cross1:Article)
+                    OPTIONAL MATCH (cross1)-[:REFERS_TO]->(cross2:Article)
                     RETURN a.lawName AS law, a.articleNumber AS article,
-                           a.chapter AS chapter, a.text AS text,
-                           COLLECT(DISTINCT {law: ref.lawName, art: ref.articleNumber, text: ref.text}) AS refs,
-                           COLLECT(DISTINCT {law: cross.lawName, art: cross.articleNumber, text: cross.text}) AS crossRefs
+                           COLLECT(DISTINCT {law: hop1.lawName, art: hop1.articleNumber, text: hop1.text}) AS hop1Refs,
+                           COLLECT(DISTINCT {law: hop2.lawName, art: hop2.articleNumber, text: hop2.text}) AS hop2Refs,
+                           COLLECT(DISTINCT {law: cross1.lawName, art: cross1.articleNumber, text: cross1.text}) AS cross1Refs,
+                           COLLECT(DISTINCT {law: cross2.lawName, art: cross2.articleNumber, text: cross2.text}) AS cross2Refs
                     """;
 
             List<Map<String, Object>> seedParams = new ArrayList<>();
@@ -95,72 +105,65 @@ public class GraphHybridRetriever implements ContentRetriever {
                 List<Map<String, Object>> rows = neo4jGraph.query(cypher,
                         Map.of("seeds", seedParams));
 
+                // 统计每条法条被多少个种子引用（跨所有 hop）
+                Map<String, Integer> refCounts = new HashMap<>();
+
                 for (Map<String, Object> row : rows) {
-                    // 引用链结果追加到向量结果后面（图谱补充，不插队）
-                    @SuppressWarnings("unchecked")
-                    List<Map<String, Object>> refs = (List<Map<String, Object>>) row.get("refs");
-                    if (refs != null) {
-                        for (Map<String, Object> r : refs) {
-                            addRefResult(merged, r, false);
-                        }
-                    }
-                    @SuppressWarnings("unchecked")
-                    List<Map<String, Object>> crossRefs = (List<Map<String, Object>>) row.get("crossRefs");
-                    if (crossRefs != null) {
-                        for (Map<String, Object> cr : crossRefs) {
-                            addRefResult(merged, cr, true);
-                        }
-                    }
+                    countRefs(row, "hop1Refs", refCounts, items);
+                    countRefs(row, "hop2Refs", refCounts, items);
+                    countRefs(row, "cross1Refs", refCounts, items);
+                    countRefs(row, "cross2Refs", refCounts, items);
+                }
+
+                // 引用次数加权：每被一个种子引用 +2 分
+                for (Map.Entry<String, Integer> e : refCounts.entrySet()) {
+                    scores.merge(e.getKey(), e.getValue() * 2.0, Double::sum);
                 }
             }
         } catch (Exception e) {
-            log.warn("图谱引用链查询失败，使用纯向量结果: {}", e.getMessage());
+            log.warn("图谱引用链查询失败: {}", e.getMessage());
         }
 
-        // === 返回 Top-N ===
-        return merged.values().stream()
+        // === 阶段3：按综合分数排序 ===
+        List<Map.Entry<String, Content>> sorted = new ArrayList<>();
+        for (Map.Entry<String, Content> e : items.entrySet()) {
+            sorted.add(e);
+        }
+        sorted.sort((a, b) -> {
+            double sa = scores.getOrDefault(a.getKey(), 0.0);
+            double sb = scores.getOrDefault(b.getKey(), 0.0);
+            return Double.compare(sb, sa); // 降序
+        });
+
+        return sorted.stream()
+                .map(Map.Entry::getValue)
                 .limit(maxResults)
                 .collect(Collectors.toList());
     }
 
-    /** 将图谱直接命中结果转为 Content */
-    private void addGraphResult(Map<String, Content> merged, Map<String, Object> row) {
-        Object law = row.get("law");
-        Object article = row.get("article");
-        if (law == null || article == null) return;
-
-        String key = law + ":" + article;
-        if (merged.containsKey(key)) return;
-
-        String chapter = row.get("chapter") != null ? row.get("chapter").toString() : "";
-        String text = row.get("text") != null ? row.get("text").toString() : "";
-
-        dev.langchain4j.data.document.Metadata meta = new dev.langchain4j.data.document.Metadata();
-        meta.put("law_name", law.toString());
-        meta.put("article_number", article.toString());
-        meta.put("chapter", chapter);
-
-        TextSegment seg = TextSegment.from(text, meta);
-        merged.put(key, Content.from(seg));
+    /** 统计引用链中每条法条的出现次数，同时把新发现的法条缓存到 items */
+    @SuppressWarnings("unchecked")
+    private void countRefs(Map<String, Object> row, String field,
+                           Map<String, Integer> refCounts, Map<String, Content> items) {
+        List<Map<String, Object>> list = (List<Map<String, Object>>) row.get(field);
+        if (list == null) return;
+        for (Map<String, Object> r : list) {
+            Object law = r.get("law");
+            Object art = r.get("art");
+            if (law == null || art == null) continue;
+            String key = law + ":" + art;
+            refCounts.merge(key, 1, Integer::sum);
+            // 缓存到 items（如果还不存在）
+            if (!items.containsKey(key)) {
+                String text = r.get("text") != null ? r.get("text").toString() : "";
+                dev.langchain4j.data.document.Metadata meta =
+                        new dev.langchain4j.data.document.Metadata();
+                meta.put("law_name", law.toString());
+                meta.put("article_number", art.toString());
+                TextSegment seg = TextSegment.from(text, meta);
+                items.put(key, Content.from(seg));
+            }
+        }
     }
 
-    /** 将引用链结果转为 Content */
-    private void addRefResult(Map<String, Content> merged, Map<String, Object> row, boolean isCross) {
-        Object law = row.get("law");
-        Object article = row.get("art");
-        if (law == null || article == null) return;
-
-        String key = law + ":" + article;
-        if (merged.containsKey(key)) return;
-
-        String text = row.get("text") != null ? row.get("text").toString() : "";
-
-        dev.langchain4j.data.document.Metadata meta = new dev.langchain4j.data.document.Metadata();
-        meta.put("law_name", law.toString());
-        meta.put("article_number", article.toString());
-        meta.put("chapter", isCross ? "[跨法律引用]" : "");
-
-        TextSegment seg = TextSegment.from(text, meta);
-        merged.put(key, Content.from(seg));
-    }
 }
