@@ -12,16 +12,16 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 图谱增强混合检索器：单次检索完成图谱定位 + 语义匹配，替代 Agent 多轮工具调用。
+ * 图谱增强混合检索器：向量初筛 → 图谱追引用链 → 合并。
  * <p>
  * 流程（一次性，无需 LLM 参与决策）：
  * <ol>
- *   <li>Neo4j 图谱查询：关键词匹配 Article 节点，追踪 REFERS_TO 和 CROSS_REFERS_TO 引用链</li>
- *   <li>Redis 向量语义检索：利用现有混合检索器补充语义相关法条</li>
- *   <li>合并去重：图谱结果优先（结构性相关），向量结果补充（语义相关）</li>
+ *   <li>向量检索 Top-10 种子法条（语义匹配，~200ms）</li>
+ *   <li>Neo4j 查这 10 条的 REFERS_TO + CROSS_REFERS_TO 引用链（~50ms）</li>
+ *   <li>合并：向量结果在前，图谱引用链追加在后，按 lawName+articleNumber 去重</li>
  * </ol>
  * <p>
- * 总耗时约 300-500ms，无 LLM 往返开销，适合 3 秒以内的在线响应要求。
+ * 向量负责初始命中，图谱负责关系补全。总耗时约 250ms。
  */
 public class GraphHybridRetriever implements ContentRetriever {
 
@@ -51,58 +51,70 @@ public class GraphHybridRetriever implements ContentRetriever {
 
     @Override
     public List<Content> retrieve(Query query) {
-        String queryText = query.text();
+        // === 阶段1：向量检索 Top-10 种子法条 ===
+        List<Content> vectorResults = hybridRetriever.retrieve(query);
+        if (vectorResults.isEmpty()) {
+            return List.of();
+        }
+
         Map<String, Content> merged = new LinkedHashMap<>();
 
-        // === 阶段1：图谱检索（结构化引用链）===
+        // 先把向量结果放入（保持向量排序）
+        for (Content c : vectorResults) {
+            String key = deduplicationKey(c);
+            if (key != null) merged.putIfAbsent(key, c);
+        }
+
+        // 取前 10 条作为图谱种子
+        List<Content> seeds = vectorResults.subList(0, Math.min(10, vectorResults.size()));
+
+        // === 阶段2：图谱追引用链 ===
         try {
             String cypher = """
-                    MATCH (a:Article)
-                    WHERE a.lawName CONTAINS $kw
-                       OR a.chapter CONTAINS $kw
-                       OR a.text CONTAINS $kw
-                    WITH a
+                    UNWIND $seeds AS seed
+                    MATCH (a:Article {lawName: seed.law, articleNumber: seed.article})
                     OPTIONAL MATCH (a)-[:REFERS_TO]->(ref:Article)
                     OPTIONAL MATCH (a)-[:CROSS_REFERS_TO]->(cross:Article)
                     RETURN a.lawName AS law, a.articleNumber AS article,
                            a.chapter AS chapter, a.text AS text,
                            COLLECT(DISTINCT {law: ref.lawName, art: ref.articleNumber, text: ref.text}) AS refs,
                            COLLECT(DISTINCT {law: cross.lawName, art: cross.articleNumber, text: cross.text}) AS crossRefs
-                    LIMIT 15
                     """;
 
-            List<Map<String, Object>> rows = neo4jGraph.query(cypher, Map.of("kw", queryText));
-
-            for (Map<String, Object> row : rows) {
-                // 直接命中节点
-                addGraphResult(merged, row);
-                // 同法律引用链
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> refs = (List<Map<String, Object>>) row.get("refs");
-                if (refs != null) {
-                    for (Map<String, Object> r : refs) {
-                        addRefResult(merged, r, false);
-                    }
+            List<Map<String, Object>> seedParams = new ArrayList<>();
+            for (Content seed : seeds) {
+                TextSegment seg = seed.textSegment();
+                String law = seg.metadata().getString("law_name");
+                String article = seg.metadata().getString("article_number");
+                if (law != null && article != null) {
+                    seedParams.add(Map.of("law", law, "article", article));
                 }
-                // 跨法律引用链
-                @SuppressWarnings("unchecked")
-                List<Map<String, Object>> crossRefs = (List<Map<String, Object>>) row.get("crossRefs");
-                if (crossRefs != null) {
-                    for (Map<String, Object> cr : crossRefs) {
-                        addRefResult(merged, cr, true);
+            }
+
+            if (!seedParams.isEmpty()) {
+                List<Map<String, Object>> rows = neo4jGraph.query(cypher,
+                        Map.of("seeds", seedParams));
+
+                for (Map<String, Object> row : rows) {
+                    // 引用链结果追加到向量结果后面（图谱补充，不插队）
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> refs = (List<Map<String, Object>>) row.get("refs");
+                    if (refs != null) {
+                        for (Map<String, Object> r : refs) {
+                            addRefResult(merged, r, false);
+                        }
+                    }
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> crossRefs = (List<Map<String, Object>>) row.get("crossRefs");
+                    if (crossRefs != null) {
+                        for (Map<String, Object> cr : crossRefs) {
+                            addRefResult(merged, cr, true);
+                        }
                     }
                 }
             }
         } catch (Exception e) {
-            log.warn("图谱检索失败，降级到纯向量检索: {}", e.getMessage());
-        }
-
-        // === 阶段2：向量语义检索补充 ===
-        List<Content> vectorResults = hybridRetriever.retrieve(query);
-        for (Content c : vectorResults) {
-            String key = deduplicationKey(c);
-            // 不覆盖已有图谱结果（图谱优先）
-            merged.putIfAbsent(key, c);
+            log.warn("图谱引用链查询失败，使用纯向量结果: {}", e.getMessage());
         }
 
         // === 返回 Top-N ===
